@@ -2,9 +2,11 @@
 header('Content-type: text/plain; charset=utf-8');
 // require __DIR__ . '/../config.php';
 require_once __DIR__ . '/../config.php';
+
 $result = include __DIR__ . '/transform.php';
 $rows = $result['data'];
 echo 'Der Transform performt' . count($rows) . " Zeilen.\n\n";
+
 try {
     $pdo = new PDO($dsn, $username, $password, $options);
     echo "Verbindung steht.\n\n";
@@ -80,4 +82,3 @@ foreach ($placeIds as $place => $placeId) {
             . $winter['max_temperature'] . " °C\n";
     }
 }
-

@@ -14,27 +14,77 @@ $rawLocations = [];
 
 foreach ($sources as $place => $file) {
     $handle = fopen($file, 'r');
+    //stündl. Schneehöhen speichern
+    $snowDepthRows = [];
 
-    $header = array_map(
-        'trim',
-        fgetcsv($handle, null, ',', '"', '')
-    );
+    //tägl. Wetterdaten speichern
+    $dailyRows = [];
 
-    $rows = [];
 
+    //Stündl. snow_depth-Block suchen
+    $snowDepthHeader = null;
     while (($row = fgetcsv($handle, null, ',', '"', '')) !== false) {
-        if ($row[0] === '') {
-            continue; // leere Zeile überspringen
+
+        if (
+            ($row[0] ?? '') === 'time'
+            && in_array('snow_depth (m)', $row, true)
+        ) {
+            $snowDepthHeader = array_map('trim', $row);
+            break;
+        }
+    }
+
+
+    $dailyHeader = null;
+
+    //Stündl. Schneehöhen einlesen
+    while (($row = fgetcsv($handle, null, ',', '"', '')) !== false) {
+
+        if (($row[0] ?? '') === '') {
+            continue;
         }
 
-        $rows[] = array_combine($header, $row);
+        // Wenn tägl. Wetterblock beginnt -> Einlesen der Schneehöhe stoppen
+        if (
+            ($row[0] ?? '') === 'time'
+            && in_array('snowfall_sum (cm)', $row, true)
+        ) {
+            $dailyHeader = array_map('trim', $row);
+            break;
+        }
+
+        if (count($row) !== count($snowDepthHeader)) {
+            continue;
+        }
+
+        $snowDepthRows[] = array_combine(
+            $snowDepthHeader,
+            $row
+        );
+    }
+
+    //Tägl. Wetterdaten einlesen
+   while (($row = fgetcsv($handle, null, ',', '"', '')) !== false) {
+
+        if (($row[0] ?? '') === '') {
+            continue;
+        }
+        if (count($row) !== count($dailyHeader)) {
+            continue;
+        }
+        $dailyRows[] = array_combine(
+            $dailyHeader,
+            $row
+        );
     }
 
     fclose($handle);
 
+
     $rawLocations[] = [
         'place' => $place,
-        'source' => $rows,
+        'snow_depth' => $snowDepthRows,
+        'daily' => $dailyRows,
     ];
 }
 
