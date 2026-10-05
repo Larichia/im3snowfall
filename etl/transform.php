@@ -1,360 +1,322 @@
 <?php
 
-$rawLocations = include __DIR__ . '/etl/extract.php';
+declare(strict_types=1);
 
-//Wintermonate: November bis April
-$winterMonths = [11, 12, 1, 2, 3, 4];
+/**
+ * Liest CSV-Dateien zeilenweise ein.
+ *
+ * Es werden keine kompletten CSV-Dateien in Arrays geladen.
+ */
 
-$audit = [
-    'input_daily_rows' => 0,
-    'input_snow_depth_rows' => 0,
-    'invalid_rows' => 0,
-    'duplicates' => 0,
-    'offseason_snow_days' => 0,
+$sources = [
+    'Andermatt' => __DIR__ . '/../data/Andermatt_sedrun_disentis_1985_2025.csv',
+    'Arosa' => __DIR__ . '/../data/Arosa_Lenzerheide_1985_2025.csv',
+    'Davos' => __DIR__ . '/../data/Davos_Dorf_1985_2025.csv',
+    'Laax' => __DIR__ . '/../data/Laax_Flims_1985_2025.csv',
+    'Samnaun' => __DIR__ . '/../data/Samnaun_Ischgl_1985_2025.csv',
+    'Scuol' => __DIR__ . '/../data/Scuol_1985_2025_2.csv',
+    'St.Moritz' => __DIR__ . '/../data/St.Moritz_1985_2025.csv',
 ];
 
-//fertige Winter-Tagesdaten
-$transformedRows = [];
-//Schneetage ausserhalb November–April
-$offseasonSnowDays = [];
-//bereits verwendete Kombinationen aus Ort und Datum
-$usedPlaceDates = [];
+
+/**
+ * Bereinigt eine CSV-Zeile.
+ */
+function cleanCsvRow(array $row): array
+{
+    return array_map(
+        static function ($value) {
+            if ($value === null) {
+                return null;
+            }
+
+            return trim((string) $value);
+        },
+        $row
+    );
+}
 
 
-// Alle Orte durchgehen
-foreach ($rawLocations as $location) {
-    $place = $location['place'];
-    //Stündl. Schneehöhe zu Tagesdurchschnitt machen
-    $snowDepthByDay = [];
-    foreach ($location['snow_depth'] as $snowRow) {
-        $audit['input_snow_depth_rows']++;
-        $time = $snowRow['time'] ?? '';
-        $snowDepthRaw = $snowRow['snow_depth (m)'] ?? null;
-        // Ungültige Schneehöhen überspringen
-        if ($time === '' || !is_numeric($snowDepthRaw)) {
-            $audit['invalid_rows']++;
-            continue;
-        }
-        // Aus z.B. "1985-01-01T13:00" wird "1985-01-01"
-        $date = substr($time, 0, 10);
-
-        if (!isset($snowDepthByDay[$date])) {
-            $snowDepthByDay[$date] = [
-                'sum' => 0,
-                'count' => 0,
-            ];
-        }
-
-        // Schneehöhen des Tages addieren
-        $snowDepthByDay[$date]['sum'] += (float) $snowDepthRaw;
-
-        // Anzahl Messungen des Tages zählen
-        $snowDepthByDay[$date]['count']++;
-    }
+/**
+ * Prüft, ob es sich um den Header des Snowdepth-Blocks handelt.
+ */
+function isSnowDepthHeader(array $row): bool
+{
+    return in_array('time', $row, true)
+        && in_array('snow_depth (m)', $row, true);
+}
 
 
-    //Tägliche Wetterdaten durchgehen
-    foreach ($location['daily'] as $row) {
-        $audit['input_daily_rows']++;
-        // Datum auslesen
-        $date = trim($row['time'] ?? '');
-        // Prüfen, ob das Datum gültig ist
-        $dateObject = DateTimeImmutable::createFromFormat(
-            '!Y-m-d',
-            $date
-        );
-        if (
-            $dateObject === false
-            || $dateObject->format('Y-m-d') !== $date
-        ) {
-            $audit['invalid_rows']++;
-            continue;
+/**
+ * Prüft, ob es sich um den Header des Daily-Blocks handelt.
+ */
+function isDailyHeader(array $row): bool
+{
+    return in_array('time', $row, true)
+        && in_array('snowfall_sum (cm)', $row, true);
+}
+
+
+/**
+ * Extractor als Generator.
+ */
+function extractRows(array $sources): Generator
+{
+    foreach ($sources as $place => $file) {
+
+        if (!is_file($file)) {
+            throw new RuntimeException(
+                "CSV-Datei nicht gefunden: {$file}"
+            );
         }
 
-        //Jahr, Monat und Tag ableiten
-        $year = (int) $dateObject->format('Y');
-        $month = (int) $dateObject->format('n');
-        $day = (int) $dateObject->format('j');
+        echo "Extract: {$place}\n";
 
-        //Messwerte auslesen
-        $snowfallRaw =
-            $row['snowfall_sum (cm)'] ?? null;
+        $handle = fopen($file, 'r');
 
-        $averageTemperatureRaw =
-            $row['temperature_2m_mean (°C)'] ?? null;
-
-        $maxTemperatureRaw =
-            $row['temperature_2m_max (°C)'] ?? null;
-
-        $minTemperatureRaw =
-            $row['temperature_2m_min (°C)'] ?? null;
-
-        //Prüfen, ob die Messwerte Zahlen sind
-        if (
-            !is_numeric($snowfallRaw)
-            || !is_numeric($averageTemperatureRaw)
-            || !is_numeric($maxTemperatureRaw)
-            || !is_numeric($minTemperatureRaw)
-        ) {
-            $audit['invalid_rows']++;
-            continue;
+        if ($handle === false) {
+            throw new RuntimeException(
+                "CSV-Datei konnte nicht geöffnet werden: {$file}"
+            );
         }
 
-        //Werte in richtige Zahlentypen umwandeln
-        $snowfall = (float) $snowfallRaw;
-        $averageTemperature =
-            (float) $averageTemperatureRaw;
+        try {
 
-        $maxTemperature =
-            (float) $maxTemperatureRaw;
+            /*
+             * ---------------------------------------------------------
+             * 1. Snowdepth-Header suchen
+             * ---------------------------------------------------------
+             */
 
-        $minTemperature =
-            (float) $minTemperatureRaw;
+            $snowDepthHeader = null;
+
+            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+
+                $row = cleanCsvRow($row);
+
+                if (isSnowDepthHeader($row)) {
+                    $snowDepthHeader = $row;
+                    break;
+                }
+            }
+
+            if ($snowDepthHeader === null) {
+                throw new RuntimeException(
+                    "Kein Snowdepth-Header gefunden für {$place}"
+                );
+            }
+
+            $timeIndex = array_search('time', $snowDepthHeader, true);
+            $snowDepthIndex = array_search(
+                'snow_depth (m)',
+                $snowDepthHeader,
+                true
+            );
+
+            if ($timeIndex === false || $snowDepthIndex === false) {
+                throw new RuntimeException(
+                    "Snowdepth-Spalten fehlen für {$place}"
+                );
+            }
 
 
-        //Durchschnittl. Schneehöhe des Tages berechnen
-        $averageSnowDepth = null;
-        if (isset($snowDepthByDay[$date])) {
-            $averageSnowDepth =
-                $snowDepthByDay[$date]['sum']
-                / $snowDepthByDay[$date]['count'];
-            $averageSnowDepth = round($averageSnowDepth, 3);
-        }
+            /*
+             * ---------------------------------------------------------
+             * 2. Stundenwerte zu Tageswerten aggregieren
+             * ---------------------------------------------------------
+             */
 
-        //Doppelte Datensätze erkennen
-        $key = $place . '-' . $date;
-        if (isset($usedPlaceDates[$key])) {
-            $audit['duplicates']++;
-            continue;
-        }
-        $usedPlaceDates[$key] = true;
+            $snowDepthByDay = [];
+
+            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+
+                $row = cleanCsvRow($row);
+
+                if (isDailyHeader($row)) {
+                    break;
+                }
+
+                if (!isset($row[$timeIndex], $row[$snowDepthIndex])) {
+                    continue;
+                }
+
+                $timestamp = $row[$timeIndex];
+                $snowDepthRaw = $row[$snowDepthIndex];
+
+                if ($timestamp === '' || $snowDepthRaw === '') {
+                    continue;
+                }
+
+                $date = substr($timestamp, 0, 10);
+
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                    continue;
+                }
+
+                $snowDepth = (float) $snowDepthRaw;
+
+                /*
+                 * Snowdepth ist in Metern.
+                 * Wir speichern später Zentimeter.
+                 */
+                $snowDepthCm = $snowDepth * 100;
+
+                if (!isset($snowDepthByDay[$date])) {
+                    $snowDepthByDay[$date] = [
+                        'sum' => 0.0,
+                        'count' => 0,
+                    ];
+                }
+
+                $snowDepthByDay[$date]['sum'] += $snowDepthCm;
+                $snowDepthByDay[$date]['count']++;
+            }
 
 
-        //Tage ausserhalb des Winters separat speichern
-        if (!in_array($month, $winterMonths, true)) {
-            // Nur wenn tatsächlich Schnee gefallen ist
-            if ($snowfall > 0) {
-                $audit['offseason_snow_days']++;
-                $offseasonSnowDays[] = [
+            /*
+             * ---------------------------------------------------------
+             * 3. Daily-Block auslesen
+             * ---------------------------------------------------------
+             *
+             * Der Header des Daily-Blocks ist die letzte gelesene Zeile.
+             */
+
+            if (!isset($row) || !isDailyHeader($row)) {
+                throw new RuntimeException(
+                    "Kein Daily-Block gefunden für {$place}"
+                );
+            }
+
+            $dailyHeader = $row;
+
+            $dailyTimeIndex = array_search(
+                'time',
+                $dailyHeader,
+                true
+            );
+
+            $snowfallIndex = array_search(
+                'snowfall_sum (cm)',
+                $dailyHeader,
+                true
+            );
+
+            $averageTemperatureIndex = array_search(
+                'temperature_2m_mean (°C)',
+                $dailyHeader,
+                true
+            );
+
+            $maxTemperatureIndex = array_search(
+                'temperature_2m_max (°C)',
+                $dailyHeader,
+                true
+            );
+
+            $minTemperatureIndex = array_search(
+                'temperature_2m_min (°C)',
+                $dailyHeader,
+                true
+            );
+
+            if (
+                $dailyTimeIndex === false ||
+                $snowfallIndex === false ||
+                $averageTemperatureIndex === false ||
+                $maxTemperatureIndex === false ||
+                $minTemperatureIndex === false
+            ) {
+                throw new RuntimeException(
+                    "Eine oder mehrere Daily-Spalten fehlen für {$place}"
+                );
+            }
+
+
+            /*
+             * ---------------------------------------------------------
+             * 4. Daily-Werte einzeln zurückgeben
+             * ---------------------------------------------------------
+             */
+
+            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+
+                $row = cleanCsvRow($row);
+
+                if (!isset($row[$dailyTimeIndex])) {
+                    continue;
+                }
+
+                $date = substr($row[$dailyTimeIndex], 0, 10);
+
+                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                    continue;
+                }
+
+                $snowfall = $row[$snowfallIndex] ?? null;
+                $averageTemperature = $row[$averageTemperatureIndex] ?? null;
+                $minTemperature = $row[$minTemperatureIndex] ?? null;
+                $maxTemperature = $row[$maxTemperatureIndex] ?? null;
+
+
+                /*
+                 * Tagesmittel der Schneehöhe berechnen.
+                 */
+                $averageSnowDepth = null;
+
+                if (
+                    isset($snowDepthByDay[$date]) &&
+                    $snowDepthByDay[$date]['count'] > 0
+                ) {
+                    $averageSnowDepth =
+                        $snowDepthByDay[$date]['sum']
+                        / $snowDepthByDay[$date]['count'];
+
+                    $averageSnowDepth = round($averageSnowDepth, 1);
+                }
+
+
+                yield [
                     'place' => $place,
                     'date' => $date,
-                    'year' => $year,
-                    'month' => $month,
-                    'day' => $day,
-                    'snowfall' => round($snowfall, 2),
+
+                    'snowfall' => (
+                    $snowfall !== null && $snowfall !== ''
+                        ? round((float) $snowfall, 1)
+                        : null
+                    ),
+
+                    'average_snow_depth' => $averageSnowDepth,
+
+                    'average_temperature' => (
+                    $averageTemperature !== null &&
+                    $averageTemperature !== ''
+                        ? round((float) $averageTemperature, 1)
+                        : null
+                    ),
+
+                    'min_temperature' => (
+                    $minTemperature !== null &&
+                    $minTemperature !== ''
+                        ? round((float) $minTemperature, 1)
+                        : null
+                    ),
+
+                    'max_temperature' => (
+                    $maxTemperature !== null &&
+                    $maxTemperature !== ''
+                        ? round((float) $maxTemperature, 1)
+                        : null
+                    ),
                 ];
             }
-            // Nicht in die Winterdaten übernehmen
-            continue;
+
+        } finally {
+            fclose($handle);
         }
 
-
-        //Saubere Winter-Zielstruktur erstellen
-        $transformedRows[] = [
-            'place' => $place,
-            'date' => $date,
-            'year' => $year,
-            'month' => $month,
-            'day' => $day,
-            'snowfall' => round($snowfall, 2),
-
-            // Tagesdurchschnitt aus den stündlichen Werten
-            'average_snow_depth' => $averageSnowDepth,
-
-            'average_temperature' =>
-                round($averageTemperature, 1),
-            'max_temperature' =>
-                round($maxTemperature, 1),
-            'min_temperature' =>
-                round($minTemperature, 1),
-        ];
+        echo "Extract abgeschlossen: {$place}\n";
     }
 }
 
 
-// Anzahl fertiger Winter-Tageszeilen
-$audit['output_rows'] = count($transformedRows);
-
-
-//Pro Ort und Jahr zusammenfassen
-$byPlaceAndYear = [];
-
-foreach ($transformedRows as $row) {
-    $key = $row['place'] . '-' . $row['year'];
-    if (!isset($byPlaceAndYear[$key])) {
-
-        $byPlaceAndYear[$key] = [
-            'place' => $row['place'],
-            'year' => $row['year'],
-
-            'snowfall_sum' => 0,
-
-            'snow_depth_sum' => 0,
-            'snow_depth_count' => 0,
-
-            'temperature_sum' => 0,
-            'temperature_count' => 0,
-        ];
-    }
-
-    // Schneefall dieses Ortes im Jahr
-    $byPlaceAndYear[$key]['snowfall_sum']
-        += $row['snowfall'];
-
-    // Schneehöhe nur verwenden, wenn Wert vorhanden ist
-    if ($row['average_snow_depth'] !== null) {
-        $byPlaceAndYear[$key]['snow_depth_sum']
-            += $row['average_snow_depth'];
-        $byPlaceAndYear[$key]['snow_depth_count']++;
-    }
-
-    // Temperatur
-    $byPlaceAndYear[$key]['temperature_sum']
-        += $row['average_temperature'];
-    $byPlaceAndYear[$key]['temperature_count']++;
-}
-
-
-//Jahreswerte pro Ort erstellen
-$yearlyByPlace = [];
-
-foreach ($byPlaceAndYear as $row) {
-    $yearlyByPlace[] = [
-        'place' => $row['place'],
-        'year' => $row['year'],
-        // gesamte Schneemenge des Ortes/Jahr
-        'snowfall' => round(
-            $row['snowfall_sum'],
-            2
-        ),
-
-        // durchschnittl. Schneehöhe
-        'average_snow_depth' =>
-            $row['snow_depth_count'] > 0
-                ? round(
-                $row['snow_depth_sum']
-                / $row['snow_depth_count'],
-                3
-            )
-                : null,
-
-        // durchschnittl. Temperatur
-        'average_temperature' => round(
-            $row['temperature_sum']
-            / $row['temperature_count'],
-            2
-        ),
-    ];
-}
-
-
-//Durchschnitt aller Orte pro Jahr berechnen
-$byYear = [];
-
-foreach ($yearlyByPlace as $row) {
-    $year = $row['year'];
-    if (!isset($byYear[$year])) {
-        $byYear[$year] = [
-            'year' => $year,
-
-            'snowfall_sum' => 0,
-
-            'snow_depth_sum' => 0,
-            'snow_depth_count' => 0,
-
-            'temperature_sum' => 0,
-
-            'places_count' => 0,
-        ];
-    }
-
-    $byYear[$year]['snowfall_sum']
-        += $row['snowfall'];
-
-    $byYear[$year]['temperature_sum']
-        += $row['average_temperature'];
-
-    $byYear[$year]['places_count']++;
-
-    if ($row['average_snow_depth'] !== null) {
-        $byYear[$year]['snow_depth_sum']
-            += $row['average_snow_depth'];
-        $byYear[$year]['snow_depth_count']++;
-    }
-}
-
-
-//Werte für Diagramme
-
-$yearlyAllPlaces = [];
-
-foreach ($byYear as $row) {
-    $yearlyAllPlaces[] = [
-        'year' => $row['year'],
-        // durchschnittl. Schneemenge aller Orte
-        'average_snowfall_all_places' => round(
-            $row['snowfall_sum']
-            / $row['places_count'],
-            2
-        ),
-
-        // durchschnittl. Schneehöhe aller Orte
-        'average_snow_depth_all_places' =>
-            $row['snow_depth_count'] > 0
-                ? round(
-                $row['snow_depth_sum']
-                / $row['snow_depth_count'],
-                3
-            )
-                : null,
-
-        // durchschnittl. Temperatur aller Orte
-        'average_temperature_all_places' => round(
-            $row['temperature_sum']
-            / $row['places_count'],
-            2
-        ),
-    ];
-}
-
-
-//Sortieren
-usort(
-    $yearlyByPlace,
-    function ($a, $b) {
-        return [$a['year'], $a['place']]
-            <=>
-            [$b['year'], $b['place']];
-    }
-);
-usort(
-    $yearlyAllPlaces,
-    function ($a, $b) {
-        return $a['year'] <=> $b['year'];
-    }
-);
-
-print_r($audit);
-print_r($transformedRows);
-
-return [
-    'question' =>
-        'Wie haben sich Schneefall, Schneehöhe und Temperatur '
-        . 'in den Wintermonaten November bis April '
-        . 'zwischen 1985 und 2025 verändert?',
-
-    // Tagesdaten November bis April
-    'data' => $transformedRows,
-
-    // Werte pro Ort und Jahr
-    'yearly_by_place' => $yearlyByPlace,
-
-    // Durchschnitt aller Orte pro Jahr
-    'yearly_all_places' => $yearlyAllPlaces,
-
-    // Schneefalltage ausserhalb November bis April
-    'offseason_snow_days' => $offseasonSnowDays,
-
-    // Kontrolle des Transforms
-    'audit' => $audit,
-];
+return extractRows($sources);

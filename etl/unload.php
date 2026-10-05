@@ -5,25 +5,19 @@ declare(strict_types=1);
 /*
  * unload.php
  *
- * Liest die Winterdaten aus der Datenbank
- * und liefert sie als JSON an das Frontend.
+ * API-Endpunkt für das Frontend.
  *
- * Datenvertrag:
- * - place
- * - day
- * - snow_depth
- * - snowfall
- * - min_temperature
- * - max_temperature
- * - masl
- * - temperature
- * - average_temperature
+ * Unterstützte Filter:
+ *
+ *   unload.php
+ *   unload.php?year=2020
+ *   unload.php?place=Andermatt
+ *   unload.php?year=2020&place=Andermatt
+ *
+ * Datenbank:
+ *   locations
+ *   weather_data
  */
-
-
-/* =========================================================
- * 1. JSON-Header
- * ========================================================= */
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -31,136 +25,225 @@ header('Content-Type: application/json; charset=utf-8');
 try {
 
     /* =====================================================
-     * 2. Datenbankverbindung
+     * 1. Datenbankverbindung
      * ===================================================== */
 
     require __DIR__ . '/../config.php';
 
+    $pdo = new PDO(
+        $dsn,
+        $username,
+        $password,
+        $options
+    );
+
+    $pdo->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+
+    $pdo->setAttribute(
+        PDO::ATTR_EMULATE_PREPARES,
+        false
+    );
+
 
     /* =====================================================
-     * 3. Optionalen place-Filter auslesen
-     *
-     * Beispiel:
-     * unload.php?place=Andermatt
+     * 2. Filter
      * ===================================================== */
 
     $place = trim($_GET['place'] ?? '');
+    $yearInput = trim($_GET['year'] ?? '');
+
+    $year = null;
 
 
     /* =====================================================
-     * 4. SQL-Abfrage
-     *
-     * c.name wird als "place" ausgegeben,
-     * damit der Datenvertrag eingehalten wird.
+     * 3. Jahr validieren
      * ===================================================== */
 
-    $sql = "
-        SELECT
-            c.name AS place,
-            w.day,
-            w.snow_depth,
-            w.snowfall,
-            w.min_temperature,
-            w.max_temperature,
-            w.masl,
-            w.temperature,
-            w.average_temperature
-        FROM Andermatt_sedrun_disentis_1985_2025.csv AS w
-        INNER JOIN cities AS c
-            ON c.id = w.city_id
-    ";
+    if ($yearInput !== '') {
 
+        if (!preg_match('/^\d{4}$/', $yearInput)) {
 
-    /*
-     * Wenn ?place=... angegeben wurde,
-     * wird nur dieser Ort geladen.
-     */
+            http_response_code(400);
 
-    $params = [];
+            echo json_encode(
+                [
+                    'error' => 'Ungültiges Jahr. Beispiel: 2020'
+                ],
+                JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE
+            );
 
-    if ($place !== '') {
+            exit;
+        }
 
-        $sql .= "
-            WHERE c.name = :place
-        ";
-
-        $params['place'] = $place;
+        $year = (int) $yearInput;
     }
 
 
     /* =====================================================
-     * 5. Sortierung
+     * 4. SQL
+     * ===================================================== */
+
+    $sql = "
+        SELECT
+            l.place,
+            l.masl,
+            w.day,
+            w.snowdepth,
+            w.snowfall,
+            w.temperature,
+            w.average_temperature,
+            w.min_temperature,
+            w.max_temperature
+
+        FROM weather_data AS w
+
+        INNER JOIN locations AS l
+            ON l.id = w.place_id
+    ";
+
+
+    /* =====================================================
+     * 5. Filter zusammenbauen
+     * ===================================================== */
+
+    $where = [];
+    $params = [];
+
+
+    /*
+     * Ort
+     *
+     * ?place=Andermatt
+     */
+    if ($place !== '') {
+
+        $where[] = 'l.place = :place';
+
+        $params[':place'] = $place;
+    }
+
+
+    /*
+     * Jahr
+     *
+     * ?year=2020
+     */
+    if ($year !== null) {
+
+        /*
+         * Wir verwenden einen Datumsbereich statt
+         * YEAR(w.day), damit der Index auf day
+         * besser genutzt werden kann.
+         */
+
+        $where[] = 'w.day >= :year_start';
+        $where[] = 'w.day < :year_end';
+
+        $params[':year_start'] = $year . '-01-01';
+        $params[':year_end'] = ($year + 1) . '-01-01';
+    }
+
+
+    if (count($where) > 0) {
+
+        $sql .= "\nWHERE " . implode(
+                "\nAND ",
+                $where
+            );
+    }
+
+
+    /* =====================================================
+     * 6. Sortierung
      * ===================================================== */
 
     $sql .= "
         ORDER BY
             w.day ASC,
-            c.name ASC
+            l.place ASC
     ";
 
 
     /* =====================================================
-     * 6. Prepared Statement ausführen
+     * 7. Query ausführen
      * ===================================================== */
 
     $stmt = $pdo->prepare($sql);
+
     $stmt->execute($params);
 
 
     /* =====================================================
-     * 7. Daten auslesen
+     * 8. Daten holen
      * ===================================================== */
 
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 
     /* =====================================================
-     * 8. Datenvertrag + Datentypen
+     * 9. API-Datenformat
      * ===================================================== */
 
-    $data = array_map(
-        static function (array $row): array {
+    $data = [];
 
-            return [
-                'place' => (string) $row['place'],
+    foreach ($rows as $row) {
 
-                'day' => (string) $row['day'],
+        $data[] = [
 
-                'snow_depth' => $row['snow_depth'] !== null
-                    ? (float) $row['snow_depth']
+            'place' => (string) $row['place'],
+
+            'day' => (string) $row['day'],
+
+            /*
+             * DB:
+             * snowdepth
+             *
+             * API:
+             * snow_depth
+             */
+            'snow_depth' =>
+                $row['snowdepth'] !== null
+                    ? (float) $row['snowdepth']
                     : null,
 
-                'snowfall' => $row['snowfall'] !== null
+            'snowfall' =>
+                $row['snowfall'] !== null
                     ? (float) $row['snowfall']
                     : null,
 
-                'min_temperature' => $row['min_temperature'] !== null
+            'min_temperature' =>
+                $row['min_temperature'] !== null
                     ? (float) $row['min_temperature']
                     : null,
 
-                'max_temperature' => $row['max_temperature'] !== null
+            'max_temperature' =>
+                $row['max_temperature'] !== null
                     ? (float) $row['max_temperature']
                     : null,
 
-                'masl' => $row['masl'] !== null
+            'masl' =>
+                $row['masl'] !== null
                     ? (int) $row['masl']
                     : null,
 
-                'temperature' => $row['temperature'] !== null
+            'temperature' =>
+                $row['temperature'] !== null
                     ? (float) $row['temperature']
                     : null,
 
-                'average_temperature' => $row['average_temperature'] !== null
+            'average_temperature' =>
+                $row['average_temperature'] !== null
                     ? (float) $row['average_temperature']
                     : null,
-            ];
-        },
-        $rows
-    );
+        ];
+    }
 
 
     /* =====================================================
-     * 9. JSON ausgeben
+     * 10. JSON
      * ===================================================== */
 
     echo json_encode(
@@ -171,19 +254,26 @@ try {
 
 } catch (Throwable $e) {
 
-    /* =====================================================
-     * 10. Fehlerbehandlung
-     * ===================================================== */
-
     http_response_code(500);
 
+    /*
+     * Fehler ins Server-Log schreiben.
+     */
     error_log(
         'unload.php Fehler: ' . $e->getMessage()
     );
 
+    /*
+     * Während der Entwicklung geben wir die eigentliche
+     * Fehlermeldung zurück.
+     *
+     * Später können wir das wieder auf eine neutrale
+     * Fehlermeldung ändern.
+     */
     echo json_encode(
         [
-            'error' => 'Beim Laden der Daten ist ein Fehler aufgetreten.'
+            'error' => 'Beim Laden der Daten ist ein Fehler aufgetreten.',
+            'message' => $e->getMessage(),
         ],
         JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE
     );
