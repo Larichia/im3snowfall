@@ -334,8 +334,8 @@ usort(
     }
 );
 
-
-
+print_r($audit);
+print_r($transformedRows);
 
 return [
     'question' =>

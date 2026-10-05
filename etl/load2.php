@@ -5,7 +5,7 @@ require_once __DIR__ . '/../config.php';
 
 $result = include __DIR__ . '/transform.php';
 $rows = $result['data'];
-echo 'Der Transform performt' . count($rows) . " Zeilen.\n\n";
+echo 'Der Transform performt ' . count($rows) . " Zeilen.\n\n";
 
 try {
     $pdo = new PDO($dsn, $username, $password, $options);
@@ -13,6 +13,7 @@ try {
 } catch (PDOException $e) {
     exit('Verbindung verkackt:' . $e->getMessage() . "\n");
 }
+/*
 $findPlace = $pdo->prepare('SELECT id FROM place WHERE name = ?');
 $insertPlace = $pdo->prepare('INSERT INTO place (name) VALUES (?)');
 
@@ -82,3 +83,5 @@ foreach ($placeIds as $place => $placeId) {
             . $winter['max_temperature'] . " °C\n";
     }
 }
+
+*/
