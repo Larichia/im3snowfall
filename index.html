@@ -2,9 +2,43 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Title</title>
+    <title>Snowfall</title>
+
+    <link rel="stylesheet" href="style.css" >
 </head>
 <body>
+
+<header>
+    <h1> Snow Fall </h1>
+</header>
+
+<main>
+    <div class="chart-container">
+
+        <div class="buttons">
+            <button onclick="loadSnowData('Andermatt')">Andermatt</button>
+            <button onclick="loadSnowData('Davos')">Davos</button>
+            <button onclick="loadSnowData('Arosa')">Arosa</button>
+            <button onclick="loadSnowData('Laax')">Laax</button>
+            <button onclick="loadSnowData('Samnaun')">Samnaun</button>
+            <button onclick="loadSnowData('Scuol')">Scuol</button>
+            <button onclick="loadSnowData('St.Moritz')">St.Moritz</button>
+        </div>
+
+        <div class="chart">
+            <canvas id="verlauf"></canvas>
+        </div>
+
+    </div>
+</main>
+
+<footer>
+   <p>copyright</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
+
+<script src="script.js"></script>
 
 </body>
 </html>
