@@ -5,7 +5,9 @@ declare(strict_types=1);
 /**
  * Liest CSV-Dateien zeilenweise ein.
  *
- * Es werden keine kompletten CSV-Dateien in Arrays geladen.
+ * Der Extract liefert ausschliesslich Tageswerte.
+ *
+ * Die CSV-Dateien werden nicht komplett in Arrays geladen.
  */
 
 $sources = [
@@ -59,6 +61,8 @@ function isDailyHeader(array $row): bool
 
 /**
  * Extractor als Generator.
+ *
+ * Liefert einen Datensatz pro Tag und Ort.
  */
 function extractRows(array $sources): Generator
 {
@@ -90,7 +94,13 @@ function extractRows(array $sources): Generator
 
             $snowDepthHeader = null;
 
-            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+            while (($row = fgetcsv(
+                    $handle,
+                    0,
+                    ',',
+                    '"',
+                    ''
+                )) !== false) {
 
                 $row = cleanCsvRow($row);
 
@@ -106,14 +116,22 @@ function extractRows(array $sources): Generator
                 );
             }
 
-            $timeIndex = array_search('time', $snowDepthHeader, true);
+            $timeIndex = array_search(
+                'time',
+                $snowDepthHeader,
+                true
+            );
+
             $snowDepthIndex = array_search(
                 'snow_depth (m)',
                 $snowDepthHeader,
                 true
             );
 
-            if ($timeIndex === false || $snowDepthIndex === false) {
+            if (
+                $timeIndex === false ||
+                $snowDepthIndex === false
+            ) {
                 throw new RuntimeException(
                     "Snowdepth-Spalten fehlen für {$place}"
                 );
@@ -122,44 +140,64 @@ function extractRows(array $sources): Generator
 
             /*
              * ---------------------------------------------------------
-             * 2. Stundenwerte zu Tageswerten aggregieren
+             * 2. Stundenwerte der Schneehöhe zu Tageswerten
              * ---------------------------------------------------------
              */
 
             $snowDepthByDay = [];
 
-            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+            while (($row = fgetcsv(
+                    $handle,
+                    0,
+                    ',',
+                    '"',
+                    ''
+                )) !== false) {
 
                 $row = cleanCsvRow($row);
 
+                /*
+                 * Sobald der Daily-Header gefunden wird,
+                 * beginnt der nächste Block.
+                 */
                 if (isDailyHeader($row)) {
                     break;
                 }
 
-                if (!isset($row[$timeIndex], $row[$snowDepthIndex])) {
+                if (
+                    !isset(
+                        $row[$timeIndex],
+                        $row[$snowDepthIndex]
+                    )
+                ) {
                     continue;
                 }
 
                 $timestamp = $row[$timeIndex];
                 $snowDepthRaw = $row[$snowDepthIndex];
 
-                if ($timestamp === '' || $snowDepthRaw === '') {
+                if (
+                    $timestamp === '' ||
+                    $snowDepthRaw === ''
+                ) {
                     continue;
                 }
 
                 $date = substr($timestamp, 0, 10);
 
-                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                if (!preg_match(
+                    '/^\d{4}-\d{2}-\d{2}$/',
+                    $date
+                )) {
                     continue;
                 }
 
-                $snowDepth = (float) $snowDepthRaw;
-
                 /*
                  * Snowdepth ist in Metern.
-                 * Wir speichern später Zentimeter.
+                 * Umrechnung in Zentimeter.
                  */
-                $snowDepthCm = $snowDepth * 100;
+                $snowDepthCm =
+                    (float) $snowDepthRaw * 100;
 
                 if (!isset($snowDepthByDay[$date])) {
                     $snowDepthByDay[$date] = [
@@ -168,26 +206,36 @@ function extractRows(array $sources): Generator
                     ];
                 }
 
-                $snowDepthByDay[$date]['sum'] += $snowDepthCm;
+                $snowDepthByDay[$date]['sum']
+                    += $snowDepthCm;
+
                 $snowDepthByDay[$date]['count']++;
             }
 
 
             /*
              * ---------------------------------------------------------
-             * 3. Daily-Block auslesen
+             * 3. Daily-Block prüfen
              * ---------------------------------------------------------
-             *
-             * Der Header des Daily-Blocks ist die letzte gelesene Zeile.
              */
 
-            if (!isset($row) || !isDailyHeader($row)) {
+            if (
+                !isset($row) ||
+                !isDailyHeader($row)
+            ) {
                 throw new RuntimeException(
                     "Kein Daily-Block gefunden für {$place}"
                 );
             }
 
             $dailyHeader = $row;
+
+
+            /*
+             * ---------------------------------------------------------
+             * 4. Daily-Spalten suchen
+             * ---------------------------------------------------------
+             */
 
             $dailyTimeIndex = array_search(
                 'time',
@@ -234,11 +282,17 @@ function extractRows(array $sources): Generator
 
             /*
              * ---------------------------------------------------------
-             * 4. Daily-Werte einzeln zurückgeben
+             * 5. Daily-Werte zurückgeben
              * ---------------------------------------------------------
              */
 
-            while (($row = fgetcsv($handle, 0, ',', '"', '')) !== false) {
+            while (($row = fgetcsv(
+                    $handle,
+                    0,
+                    ',',
+                    '"',
+                    ''
+                )) !== false) {
 
                 $row = cleanCsvRow($row);
 
@@ -246,21 +300,38 @@ function extractRows(array $sources): Generator
                     continue;
                 }
 
-                $date = substr($row[$dailyTimeIndex], 0, 10);
+                $date = substr(
+                    $row[$dailyTimeIndex],
+                    0,
+                    10
+                );
 
-                if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+                if (!preg_match(
+                    '/^\d{4}-\d{2}-\d{2}$/',
+                    $date
+                )) {
                     continue;
                 }
 
-                $snowfall = $row[$snowfallIndex] ?? null;
-                $averageTemperature = $row[$averageTemperatureIndex] ?? null;
-                $minTemperature = $row[$minTemperatureIndex] ?? null;
-                $maxTemperature = $row[$maxTemperatureIndex] ?? null;
+                $snowfall =
+                    $row[$snowfallIndex] ?? null;
+
+                $averageTemperature =
+                    $row[$averageTemperatureIndex] ?? null;
+
+                $minTemperature =
+                    $row[$minTemperatureIndex] ?? null;
+
+                $maxTemperature =
+                    $row[$maxTemperatureIndex] ?? null;
 
 
                 /*
-                 * Tagesmittel der Schneehöhe berechnen.
+                 * -----------------------------------------------------
+                 * Tagesdurchschnitt der Schneehöhe
+                 * -----------------------------------------------------
                  */
+
                 $averageSnowDepth = null;
 
                 if (
@@ -271,40 +342,61 @@ function extractRows(array $sources): Generator
                         $snowDepthByDay[$date]['sum']
                         / $snowDepthByDay[$date]['count'];
 
-                    $averageSnowDepth = round($averageSnowDepth, 1);
+                    $averageSnowDepth =
+                        round($averageSnowDepth, 1);
                 }
 
+
+                /*
+                 * -----------------------------------------------------
+                 * Tagesdatensatz
+                 * -----------------------------------------------------
+                 */
 
                 yield [
                     'place' => $place,
                     'date' => $date,
 
                     'snowfall' => (
-                    $snowfall !== null && $snowfall !== ''
-                        ? round((float) $snowfall, 1)
+                    $snowfall !== null &&
+                    $snowfall !== ''
+                        ? round(
+                        (float) $snowfall,
+                        1
+                    )
                         : null
                     ),
 
-                    'average_snow_depth' => $averageSnowDepth,
+                    'average_snow_depth' =>
+                        $averageSnowDepth,
 
                     'average_temperature' => (
                     $averageTemperature !== null &&
                     $averageTemperature !== ''
-                        ? round((float) $averageTemperature, 1)
+                        ? round(
+                        (float) $averageTemperature,
+                        1
+                    )
                         : null
                     ),
 
                     'min_temperature' => (
                     $minTemperature !== null &&
                     $minTemperature !== ''
-                        ? round((float) $minTemperature, 1)
+                        ? round(
+                        (float) $minTemperature,
+                        1
+                    )
                         : null
                     ),
 
                     'max_temperature' => (
                     $maxTemperature !== null &&
                     $maxTemperature !== ''
-                        ? round((float) $maxTemperature, 1)
+                        ? round(
+                        (float) $maxTemperature,
+                        1
+                    )
                         : null
                     ),
                 ];
